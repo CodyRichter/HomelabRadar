@@ -1,0 +1,354 @@
+# Presence sensor: XIAO ESP32S3 + HLK-LD2450 radar, OLED views switched with a push button.
+# Home Assistant connects in over the ESPHome native API.
+substitutions:
+  # -1 draws the map and L/R labels from the viewpoint of someone facing the radar (mirror view).
+  x_sign: "-1"
+
+esphome:
+  name: radar
+  friendly_name: Radar
+  on_boot:
+    priority: -100
+    then:
+      # Give the LD2450 time to report its settings before changing them.
+      - delay: 10s
+      # Bluetooth is on from the factory and lets any nearby phone reconfigure the radar.
+      - if:
+          condition:
+            switch.is_on: radar_bluetooth
+          then:
+            - switch.turn_off: radar_bluetooth
+      # Ignore anything closer than ~2 ft (610 mm): a box in front of the radar as a Filter zone.
+      - number.set: {id: zone1_x1, value: -610}
+      - number.set: {id: zone1_y1, value: 0}
+      - number.set: {id: zone1_x2, value: 610}
+      - number.set: {id: zone1_y2, value: 610}
+      - select.set: {id: zone_type, option: Filter}
+      - delay: 3s
+      - logger.log:
+          format: "Radar settings: bluetooth=%s zone=%s (%.0f,%.0f)-(%.0f,%.0f) mm"
+          args:
+            - 'id(radar_bluetooth).state ? "ON" : "OFF"'
+            - 'id(zone_type).current_option().c_str()'
+            - 'id(zone1_x1).state'
+            - 'id(zone1_y1).state'
+            - 'id(zone1_x2).state'
+            - 'id(zone1_y2).state'
+
+esp32:
+  board: seeed_xiao_esp32s3
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Light sleep adds latency to every update Home Assistant receives.
+  power_save_mode: none
+  # If Skyline is unreachable, the board opens this network to re-enter Wi-Fi details.
+  ap:
+    ssid: Radar Setup
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# LD2450 on XIAO D7/D6: radar TX -> D7 (GPIO44), radar RX <- D6 (GPIO43)
+uart:
+  id: ld_uart
+  tx_pin: GPIO43
+  rx_pin: GPIO44
+  baud_rate: 256000
+  parity: NONE
+  stop_bits: 1
+
+ld2450:
+  id: ld
+  uart_id: ld_uart
+
+sensor:
+  - platform: ld2450
+    ld2450_id: ld
+    target_count:
+      id: target_count
+      name: Target Count
+      filters: &fast
+        # The default filters throttle to 1/s. Replace them so every ~90 ms radar frame gets through.
+        - timeout:
+            timeout: 1s
+            value: last
+    target_1:
+      x:
+        id: t1_x
+        name: Target 1 X
+        internal: true
+        filters: *fast
+      y:
+        id: t1_y
+        name: Target 1 Y
+        internal: true
+        filters: *fast
+    target_2:
+      x:
+        id: t2_x
+        name: Target 2 X
+        internal: true
+        filters: *fast
+      y:
+        id: t2_y
+        name: Target 2 Y
+        internal: true
+        filters: *fast
+    target_3:
+      x:
+        id: t3_x
+        name: Target 3 X
+        internal: true
+        filters: *fast
+      y:
+        id: t3_y
+        name: Target 3 Y
+        internal: true
+        filters: *fast
+
+  # Home Assistant gets the nearest person's distance instead of raw positions.
+  - platform: template
+    id: nearest_distance
+    name: Nearest Distance
+    unit_of_measurement: ft
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 1s
+    lambda: |-
+      sensor::Sensor *xs[] = {id(t1_x), id(t2_x), id(t3_x)};
+      sensor::Sensor *ys[] = {id(t1_y), id(t2_y), id(t3_y)};
+      float nearest = NAN;
+      for (int i = 0; i < 3; i++) {
+        float x = xs[i]->state, y = ys[i]->state;
+        if (isnan(x) || isnan(y) || y <= 0) continue;
+        float d = sqrtf(x * x + y * y);
+        if (isnan(nearest) || d < nearest) nearest = d;
+      }
+      return nearest / 304.8f;
+    filters:
+      - or:
+          - delta: 0.3
+          - heartbeat: 60s
+
+switch:
+  - platform: ld2450
+    ld2450_id: ld
+    bluetooth:
+      id: radar_bluetooth
+      name: Radar Bluetooth
+
+select:
+  - platform: ld2450
+    ld2450_id: ld
+    zone_type:
+      id: zone_type
+      name: Zone Type
+      internal: true
+
+number:
+  - platform: ld2450
+    ld2450_id: ld
+    presence_timeout:
+      name: Presence Timeout
+    zone_1:
+      x1:
+        id: zone1_x1
+        name: Zone 1 X1
+        internal: true
+      y1:
+        id: zone1_y1
+        name: Zone 1 Y1
+        internal: true
+      x2:
+        id: zone1_x2
+        name: Zone 1 X2
+        internal: true
+      y2:
+        id: zone1_y2
+        name: Zone 1 Y2
+        internal: true
+
+binary_sensor:
+  - platform: ld2450
+    ld2450_id: ld
+    has_target:
+      id: has_target
+      name: Presence
+
+  # Push button between D0 (GPIO1) and GND. Short press: next view. Hold 1 s: screen off/on.
+  - platform: gpio
+    id: view_button
+    name: View Button
+    internal: true
+    pin:
+      number: GPIO1
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on_off: 20ms
+    on_click:
+      - min_length: 20ms
+        max_length: 600ms
+        then:
+          - if:
+              condition:
+                lambda: 'return !id(screen_on);'
+              then:
+                - globals.set: {id: screen_on, value: 'true'}
+              else:
+                - display.page.show_next: oled
+          - component.update: oled
+      - min_length: 1s
+        max_length: 10s
+        then:
+          - lambda: 'id(screen_on) = !id(screen_on);'
+          - component.update: oled
+
+globals:
+  - id: screen_on
+    type: bool
+    initial_value: 'true'
+
+# OLED on XIAO D9/D10: SDA D9 (GPIO8), SCL D10 (GPIO9). scan logs every address that answers.
+i2c:
+  sda: GPIO8
+  scl: GPIO9
+  scan: true
+  frequency: 400kHz
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 11
+  - file: "gfonts://Roboto@500"
+    id: font_big
+    size: 26
+
+# Views share the targets: empty slots report y = 0. Left/right is as seen facing the radar.
+display:
+  - platform: ssd1306_i2c
+    id: oled
+    model: "SSD1306 128x64"
+    address: 0x3C
+    update_interval: 100ms
+    pages:
+      # 1. Top-down map: radar at bottom centre, 1 px = 10 cm, so the 6 m (~20 ft) range spans 60 px.
+      - id: page_map
+        lambda: |-
+          if (!id(screen_on)) return;
+          const int cx = 64, cy = 63;
+          const float mm_per_px = 100.0f;
+          const float mm_per_ft = 304.8f;
+
+          // ±60° field-of-view edges
+          it.line(cx, cy, cx - 52, cy - 30);
+          it.line(cx, cy, cx + 52, cy - 30);
+          // Dotted range rings at 5, 10, 15 and 20 ft, one dot every ~4 px
+          for (int ft = 5; ft <= 20; ft += 5) {
+            float r = ft * mm_per_ft / mm_per_px;
+            for (float a = -60.0f; a <= 60.0f; a += 240.0f / r) {
+              float rad = a * M_PI / 180.0f;
+              it.draw_pixel_at(cx + r * sinf(rad), cy - r * cosf(rad));
+            }
+          }
+
+          sensor::Sensor *xs[] = {id(t1_x), id(t2_x), id(t3_x)};
+          sensor::Sensor *ys[] = {id(t1_y), id(t2_y), id(t3_y)};
+          // Count what is drawn, so the label always matches the dots.
+          int n = 0;
+          float nearest = NAN;
+          for (int i = 0; i < 3; i++) {
+            float x = xs[i]->state, y = ys[i]->state;
+            if (isnan(x) || isnan(y) || y <= 0) continue;
+            it.filled_circle(cx + (int) (${x_sign} * x / mm_per_px), cy - (int) (y / mm_per_px), 3);
+            float d = sqrtf(x * x + y * y);
+            if (isnan(nearest) || d < nearest) nearest = d;
+            n++;
+          }
+
+          if (n > 0) {
+            it.printf(0, 0, id(font_small), "%d here", n);
+          } else {
+            it.print(0, 0, id(font_small), "Clear");
+          }
+          if (!isnan(nearest)) {
+            it.printf(127, 0, id(font_small), TextAlign::TOP_RIGHT, "%.1fft", nearest / mm_per_ft);
+          }
+
+      # 2. Big status: readable from across the room.
+      - id: page_status
+        lambda: |-
+          if (!id(screen_on)) return;
+          const float mm_per_ft = 304.8f;
+          sensor::Sensor *xs[] = {id(t1_x), id(t2_x), id(t3_x)};
+          sensor::Sensor *ys[] = {id(t1_y), id(t2_y), id(t3_y)};
+          // Count tracked targets directly; has_target lingers after they leave and would show "0 people".
+          int n = 0;
+          float nearest = NAN;
+          for (int i = 0; i < 3; i++) {
+            float x = xs[i]->state, y = ys[i]->state;
+            if (isnan(x) || isnan(y) || y <= 0) continue;
+            float d = sqrtf(x * x + y * y);
+            if (isnan(nearest) || d < nearest) nearest = d;
+            n++;
+          }
+
+          if (n == 0) {
+            it.print(64, 32, id(font_big), TextAlign::CENTER, "Clear");
+            return;
+          }
+          it.printf(64, 22, id(font_big), TextAlign::CENTER, "%d %s", n, n == 1 ? "person" : "people");
+          it.printf(64, 52, id(font_small), TextAlign::CENTER, "Nearest %.1f ft", nearest / mm_per_ft);
+
+      # 3. Target list: X = sideways offset (L/R as drawn on the map), Y = distance straight out, and angle.
+      - id: page_targets
+        lambda: |-
+          if (!id(screen_on)) return;
+          const float mm_per_ft = 304.8f;
+          sensor::Sensor *xs[] = {id(t1_x), id(t2_x), id(t3_x)};
+          sensor::Sensor *ys[] = {id(t1_y), id(t2_y), id(t3_y)};
+
+          it.print(0, 0, id(font_small), "#");
+          it.print(50, 0, id(font_small), TextAlign::TOP_RIGHT, "X ft");
+          it.print(88, 0, id(font_small), TextAlign::TOP_RIGHT, "Y ft");
+          it.print(127, 0, id(font_small), TextAlign::TOP_RIGHT, "angle");
+          it.horizontal_line(0, 13, 128);
+
+          // Only tracked people get a row, numbered in order with no gaps.
+          int n = 0;
+          for (int i = 0; i < 3; i++) {
+            float x = xs[i]->state, y = ys[i]->state;
+            if (isnan(x) || isnan(y) || y <= 0) continue;
+            int row = 16 + n * 16;
+            n++;
+            it.printf(0, row, id(font_small), "%d", n);
+            float sx = ${x_sign} * x;
+            float x_ft = fabsf(sx) / mm_per_ft;
+            float angle = atan2f(fabsf(sx), y) * 180.0f / M_PI;
+            const char *side = x_ft < 0.05f ? "" : (sx < 0 ? "L" : "R");
+            it.printf(50, row, id(font_small), TextAlign::TOP_RIGHT, "%s%.1f", side, x_ft);
+            it.printf(88, row, id(font_small), TextAlign::TOP_RIGHT, "%.1f", y / mm_per_ft);
+            it.printf(127, row, id(font_small), TextAlign::TOP_RIGHT, "%s%.0f°", angle < 1 ? "" : side, angle);
+          }
+          if (n == 0) {
+            it.print(64, 38, id(font_small), TextAlign::CENTER, "Clear");
+          }
