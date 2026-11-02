@@ -6,19 +6,24 @@ An mmWave presence sensor for Home Assistant, built with ESPHome. An HLK-LD2450 
 - Seeed Studio XIAO ESP32S3, with a 2.4 GHz U.FL antenna (the board has no onboard antenna)
 - HLK-LD2450 24 GHz radar
 - 0.96" SSD1306 OLED, 128×64, I2C
-- Momentary push button
+- 2 momentary push buttons
 
 ## Wiring
+![Wiring diagram: XIAO ESP32S3 to the LD2450 radar, SSD1306 OLED and two push buttons](RadarDiagram.png)
+
+The XIAO is drawn from the component side with USB-C at the top. Button 2 (D1) is wired but not used in the firmware yet. To edit the diagram, open `docs/wiring.excalidraw` at https://draw.lab.richter.codes, then use Export image → PNG to replace `RadarDiagram.png`.
+
 | XIAO pin | Connects to |
 |---|---|
 | 5V | LD2450 5V |
-| GND | LD2450 GND, OLED GND, button |
+| GND | LD2450 GND, OLED GND, both buttons |
 | D7 (GPIO44) | LD2450 TX |
 | D6 (GPIO43) | LD2450 RX |
 | 3V3 | OLED VCC |
 | D9 (GPIO8) | OLED SDA |
 | D10 (GPIO9) | OLED SCL |
-| D0 (GPIO1) | Button (other leg to GND; uses the internal pull-up) |
+| D0 (GPIO1) | Button 1 (other leg to GND; uses the internal pull-up) |
+| D1 (GPIO2) | Button 2 (other leg to GND; not in the firmware yet) |
 
 The LD2450 runs on 5 V, but its UART uses 3.3 V logic, so it connects directly. Power the OLED from 3V3, not 5V. Many modules pull SDA/SCL up to their VCC.
 
